@@ -1,10 +1,12 @@
 package main
 
 import (
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -18,8 +20,9 @@ import (
 func main() {
 	addr := flag.String("addr", "127.0.0.1:2222", "server address")
 	password := flag.String("password", "", "server password")
-	proto := flag.String("proto", "tcp", "transport protocol: tcp or httpws")
-	wsPath := flag.String("ws-path", "/ws", "websocket path when -proto=httpws")
+	proto := flag.String("proto", "tcp", "transport protocol: tcp, httpws, or httpswss")
+	wsPath := flag.String("ws-path", "/ws", "websocket path when -proto=httpws|httpswss")
+	insecureTLS := flag.Bool("insecure-tls", false, "skip TLS certificate verification (httpswss only)")
 	flag.Parse()
 
 	if *password == "" {
@@ -44,8 +47,12 @@ func main() {
 			os.Exit(1)
 		}
 		rwc = conn
-	case "httpws":
-		u := url.URL{Scheme: "ws", Host: *addr, Path: *wsPath}
+	case "httpws", "httpswss":
+		scheme := "ws"
+		if *proto == "httpswss" {
+			scheme = "wss"
+		}
+		u := url.URL{Scheme: scheme, Host: *addr, Path: *wsPath}
 		if strings.HasPrefix(*addr, "ws://") || strings.HasPrefix(*addr, "wss://") {
 			parsed, err := url.Parse(*addr)
 			if err != nil {
@@ -56,11 +63,23 @@ func main() {
 				parsed.Path = *wsPath
 			}
 			u = *parsed
+			if *proto == "httpswss" {
+				u.Scheme = "wss"
+			}
 		}
 
-		conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+		dialer := websocket.Dialer{}
+		if *proto == "httpswss" {
+			dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: *insecureTLS}
+		}
+
+		conn, resp, err := dialer.Dial(u.String(), http.Header{})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "connect error: %v\n", err)
+			if resp != nil {
+				fmt.Fprintf(os.Stderr, "connect error: %v (http status: %s)\n", err, resp.Status)
+			} else {
+				fmt.Fprintf(os.Stderr, "connect error: %v\n", err)
+			}
 			os.Exit(1)
 		}
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(*password)); err != nil {
@@ -74,7 +93,7 @@ func main() {
 		}
 		rwc = protocol.NewWSStream(conn)
 	default:
-		fmt.Fprintln(os.Stderr, "-proto must be one of: tcp, httpws")
+		fmt.Fprintln(os.Stderr, "-proto must be one of: tcp, httpws, httpswss")
 		os.Exit(2)
 	}
 	defer rwc.Close()

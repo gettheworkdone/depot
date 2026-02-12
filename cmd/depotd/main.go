@@ -20,8 +20,10 @@ import (
 func main() {
 	addr := flag.String("listen", "0.0.0.0:2222", "listen address")
 	password := flag.String("password", "", "required client password")
-	proto := flag.String("proto", "tcp", "transport protocol: tcp or httpws")
-	wsPath := flag.String("ws-path", "/ws", "websocket path when -proto=httpws")
+	proto := flag.String("proto", "tcp", "transport protocol: tcp, httpws, or httpswss")
+	wsPath := flag.String("ws-path", "/ws", "websocket path when -proto=httpws|httpswss")
+	tlsCert := flag.String("tls-cert", "", "TLS certificate PEM file (required for -proto=httpswss)")
+	tlsKey := flag.String("tls-key", "", "TLS private key PEM file (required for -proto=httpswss)")
 	flag.Parse()
 
 	if *password == "" {
@@ -36,9 +38,15 @@ func main() {
 	case "tcp":
 		runTCP(*addr, *password, &mu, &busy)
 	case "httpws":
-		runHTTPWS(*addr, *wsPath, *password, &mu, &busy)
+		runHTTPWS(*addr, *wsPath, *password, &mu, &busy, false, "", "")
+	case "httpswss":
+		if *tlsCert == "" || *tlsKey == "" {
+			fmt.Fprintln(os.Stderr, "-tls-cert and -tls-key are required for -proto=httpswss")
+			os.Exit(2)
+		}
+		runHTTPWS(*addr, *wsPath, *password, &mu, &busy, true, *tlsCert, *tlsKey)
 	default:
-		fmt.Fprintln(os.Stderr, "-proto must be one of: tcp, httpws")
+		fmt.Fprintln(os.Stderr, "-proto must be one of: tcp, httpws, httpswss")
 		os.Exit(2)
 	}
 }
@@ -75,7 +83,7 @@ func runTCP(addr, password string, mu *sync.Mutex, busy *bool) {
 	}
 }
 
-func runHTTPWS(addr, wsPath, password string, mu *sync.Mutex, busy *bool) {
+func runHTTPWS(addr, wsPath, password string, mu *sync.Mutex, busy *bool, tlsEnabled bool, certFile, keyFile string) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 	mux := http.NewServeMux()
@@ -99,7 +107,13 @@ func runHTTPWS(addr, wsPath, password string, mu *sync.Mutex, busy *bool) {
 		handleWSConn(conn, password)
 	})
 
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	var err error
+	if tlsEnabled {
+		err = http.ListenAndServeTLS(addr, certFile, keyFile, mux)
+	} else {
+		err = http.ListenAndServe(addr, mux)
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "listen error: %v\n", err)
 		os.Exit(1)
 	}
