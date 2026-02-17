@@ -1,26 +1,39 @@
 # depot / depotd
 
+<<<<<<< codex/develop-ssh-alternative-with-interactive-console-rfwga5
 A minimal Linux-only remote interactive console with selectable transport.
+=======
+A minimal Linux-only remote interactive console over raw TCP.
+>>>>>>> main
 
 - `depotd`: server daemon
 - `depot`: client
 
 ## Notes
 
+<<<<<<< codex/develop-ssh-alternative-with-interactive-console-rfwga5
 - `-proto tcp` uses raw TCP with no encryption and no secure handshake.
 - `-proto httpws` uses HTTP + WebSocket framing (plaintext unless TLS is terminated externally).
 - `-proto httpswss` uses HTTPS + secure WebSocket (WSS) with in-process TLS cert/key.
+=======
+- No encryption and no secure handshake are implemented.
+>>>>>>> main
 - Simple password authentication is required.
 - Single active client connection at a time.
 - Shell is `/bin/bash` on the server.
 
+<<<<<<< codex/develop-ssh-alternative-with-interactive-console-rfwga5
 ## Build (Linux)
+=======
+## Build
+>>>>>>> main
 
 ```bash
 go build ./cmd/depot
 go build ./cmd/depotd
 ```
 
+<<<<<<< codex/develop-ssh-alternative-with-interactive-console-rfwga5
 ## Build for macOS binaries (cross-compile from Linux)
 
 ```bash
@@ -48,16 +61,24 @@ Connect client:
 ```
 
 ## Run (HTTP + WebSocket)
+=======
+## Run
+>>>>>>> main
 
 Start server:
 
 ```bash
+<<<<<<< codex/develop-ssh-alternative-with-interactive-console-rfwga5
 ./depotd -proto httpws -listen 0.0.0.0:8080 -ws-path /ws -password yourpass
+=======
+./depotd -listen 0.0.0.0:2222 -password yourpass
+>>>>>>> main
 ```
 
 Connect client:
 
 ```bash
+<<<<<<< codex/develop-ssh-alternative-with-interactive-console-rfwga5
 ./depot -proto httpws -addr 127.0.0.1:8080 -ws-path /ws -password yourpass
 ```
 
@@ -89,6 +110,11 @@ For self-signed certs in testing:
 
 For trusted certificates, omit `-insecure-tls`.
 
+=======
+./depot -addr 127.0.0.1:2222 -password yourpass
+```
+
+>>>>>>> main
 ## Behavior
 
 - If password is wrong, connection is rejected.
