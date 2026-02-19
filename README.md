@@ -103,14 +103,14 @@ openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
 ### Start secure server
 
 ```bash
-./depotd -proto httpswss -listen 0.0.0.0:8443 -ws-path /ws \
+./depotd -proto httpswss -listen 0.0.0.0:443 -ws-path /ws \
   -tls-cert server.crt -tls-key server.key -password yourpass
 ```
 
 ### Connect secure client
 
 ```bash
-./depot -proto httpswss -addr ${VPS_IP}:8443 -ws-path /ws -password yourpass
+./depot -proto httpswss -addr ${VPS_IP}:443 -ws-path /ws -password yourpass
 ```
 
 If your cert is self-signed, add `server.crt` to your client trust store (for example, in macOS Keychain as a trusted certificate) before connecting.
@@ -118,24 +118,18 @@ If your cert is self-signed, add `server.crt` to your client trust store (for ex
 ## Run `depotd` permanently on VPS with auto-restart (systemd)
 
 1. Copy `depotd`, `server.crt`, and `server.key` to the VPS.
-2. Create a dedicated user (recommended):
+2. Put files in place under `/root/depot`:
 
 ```bash
-sudo useradd --system --create-home --shell /usr/sbin/nologin depot || true
+sudo mkdir -p /root/depot
+sudo cp ./depotd /root/depot/depotd
+sudo cp ./server.crt /root/depot/server.crt
+sudo cp ./server.key /root/depot/server.key
+sudo chmod 700 /root/depot
+sudo chmod 600 /root/depot/server.key
 ```
 
-3. Put files in place:
-
-```bash
-sudo mkdir -p /opt/depot
-sudo cp ./depotd /opt/depot/depotd
-sudo cp ./server.crt /opt/depot/server.crt
-sudo cp ./server.key /opt/depot/server.key
-sudo chown -R depot:depot /opt/depot
-sudo chmod 600 /opt/depot/server.key
-```
-
-4. Create `/etc/systemd/system/depotd.service`:
+3. Create `/etc/systemd/system/depotd.service`:
 
 ```ini
 [Unit]
@@ -145,10 +139,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=depot
-Group=depot
-WorkingDirectory=/opt/depot
-ExecStart=/opt/depot/depotd -proto httpswss -listen 0.0.0.0:8443 -ws-path /ws -tls-cert /opt/depot/server.crt -tls-key /opt/depot/server.key -password yourpass
+User=root
+Group=root
+WorkingDirectory=/root/depot
+ExecStart=/root/depot/depotd -proto httpswss -listen 0.0.0.0:443 -ws-path /ws -tls-cert /root/depot/server.crt -tls-key /root/depot/server.key -password yourpass
 Restart=always
 RestartSec=2
 
@@ -156,14 +150,14 @@ RestartSec=2
 WantedBy=multi-user.target
 ```
 
-5. Enable + start:
+4. Enable + start:
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now depotd
 ```
 
-6. Verify:
+5. Verify:
 
 ```bash
 sudo systemctl status depotd
