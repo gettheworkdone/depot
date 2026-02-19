@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
@@ -22,7 +21,6 @@ func main() {
 	password := flag.String("password", "", "server password")
 	proto := flag.String("proto", "tcp", "transport protocol: tcp, httpws, or httpswss")
 	wsPath := flag.String("ws-path", "/ws", "websocket path when -proto=httpws|httpswss")
-	insecureTLS := flag.Bool("insecure-tls", false, "skip TLS certificate verification (httpswss only)")
 	flag.Parse()
 
 	if *password == "" {
@@ -69,10 +67,6 @@ func main() {
 		}
 
 		dialer := websocket.Dialer{}
-		if *proto == "httpswss" {
-			dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: *insecureTLS}
-		}
-
 		conn, resp, err := dialer.Dial(u.String(), http.Header{})
 		if err != nil {
 			if resp != nil {
