@@ -97,7 +97,7 @@ func main() {
 		defer term.Restore(int(os.Stdin.Fd()), oldState)
 	}
 
-	doneIn := make(chan struct{})
+	doneOut := make(chan struct{})
 	go func() {
 		_, _ = io.Copy(rwc, os.Stdin)
 		if tcpConn, ok := rwc.(*net.TCPConn); ok {
@@ -106,9 +106,13 @@ func main() {
 		if ws, ok := rwc.(*protocol.WSStream); ok {
 			_ = ws.SendEOF()
 		}
-		close(doneIn)
 	}()
 
-	_, _ = io.Copy(os.Stdout, rwc)
-	<-doneIn
+	go func() {
+		_, _ = io.Copy(os.Stdout, rwc)
+		close(doneOut)
+	}()
+
+	<-doneOut
+	_ = rwc.Close()
 }

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 
 	"depot/internal/protocol"
 
@@ -150,7 +151,7 @@ func handleWSConn(conn *websocket.Conn, expectedPassword string) {
 	runShell(stream)
 }
 
-func runShell(stream io.ReadWriter) {
+func runShell(stream io.ReadWriteCloser) {
 	cmd := exec.Command("/bin/bash")
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
@@ -158,22 +159,35 @@ func runShell(stream io.ReadWriter) {
 	}
 	defer func() {
 		_ = ptmx.Close()
+		_ = stream.Close()
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 			_, _ = cmd.Process.Wait()
 		}
 	}()
 
-	doneOut := make(chan struct{})
+	doneOut := make(chan error, 1)
+	doneIn := make(chan error, 1)
 	go func() {
-		_, _ = io.Copy(stream, ptmx)
-		close(doneOut)
+		_, err := io.Copy(stream, ptmx)
+		doneOut <- err
+	}()
+	go func() {
+		_, err := io.Copy(ptmx, stream)
+		doneIn <- err
 	}()
 
-	_, err = io.Copy(ptmx, stream)
-	if err == nil || errors.Is(err, io.EOF) {
-		_, _ = ptmx.Write([]byte{4})
+	select {
+	case <-doneOut:
+		return
+	case err := <-doneIn:
+		if err == nil || errors.Is(err, io.EOF) {
+			_, _ = ptmx.Write([]byte{4})
+		}
+		select {
+		case <-doneOut:
+		case <-time.After(2 * time.Second):
+		}
+		return
 	}
-
-	<-doneOut
 }

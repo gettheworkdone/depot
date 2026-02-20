@@ -115,6 +115,12 @@ openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
 
 If your cert is self-signed, add `server.crt` to your client trust store (for example, in macOS Keychain as a trusted certificate) before connecting.
 
+On macOS, you can trust it from terminal with:
+
+```bash
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ./server.crt
+```
+
 ## Run `depotd` permanently on VPS with auto-restart (systemd)
 
 1. Copy `depotd`, `server.crt`, and `server.key` to the VPS.
