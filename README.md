@@ -115,6 +115,13 @@ openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
 
 If your cert is self-signed, add `server.crt` to your client trust store (for example, in macOS Keychain as a trusted certificate) before connecting.
 
+
+If your ISP path is sensitive to non-browser WebSocket handshakes, you can set browser-like headers:
+
+```bash
+./depot -proto httpswss -addr ${VPS_IP}:443 -ws-path /ws   -ws-user-agent "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"   -ws-origin "https://websocketking.com"   -password yourpass
+```
+
 On macOS, you can trust it from terminal with:
 
 ```bash

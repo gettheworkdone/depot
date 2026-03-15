@@ -205,18 +205,13 @@ func (w *WSStream) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	ack := make(chan error, 1)
 	copyBuf := append([]byte(nil), p...)
 	select {
 	case <-w.closeCh:
 		return 0, io.ErrClosedPipe
-	case w.sendCh <- wsMsg{kind: wsMsgData, data: copyBuf, ack: ack}:
+	case w.sendCh <- wsMsg{kind: wsMsgData, data: copyBuf}:
+		return len(p), nil
 	}
-	err := <-ack
-	if err != nil {
-		return 0, err
-	}
-	return len(p), nil
 }
 
 func (w *WSStream) SendEOF() error {

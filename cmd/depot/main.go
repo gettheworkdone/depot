@@ -23,6 +23,8 @@ func main() {
 	password := flag.String("password", "", "server password")
 	proto := flag.String("proto", "tcp", "transport protocol: tcp, httpws, or httpswss")
 	wsPath := flag.String("ws-path", "/ws", "websocket path when -proto=httpws|httpswss")
+	wsUserAgent := flag.String("ws-user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36", "WebSocket User-Agent header")
+	wsOrigin := flag.String("ws-origin", "", "optional WebSocket Origin header")
 	flag.Parse()
 
 	if *password == "" {
@@ -69,7 +71,13 @@ func main() {
 		}
 
 		dialer := websocket.Dialer{EnableCompression: false}
-		conn, resp, err := dialer.Dial(u.String(), http.Header{})
+		hdr := http.Header{}
+		hdr.Set("User-Agent", *wsUserAgent)
+		if *wsOrigin != "" {
+			hdr.Set("Origin", *wsOrigin)
+		}
+
+		conn, resp, err := dialer.Dial(u.String(), hdr)
 		if err != nil {
 			if resp != nil {
 				fmt.Fprintf(os.Stderr, "connect error: %v (http status: %s)\n", err, resp.Status)
