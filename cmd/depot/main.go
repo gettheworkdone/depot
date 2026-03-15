@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"depot/internal/protocol"
 
@@ -97,10 +99,10 @@ func main() {
 		defer term.Restore(int(os.Stdin.Fd()), oldState)
 	}
 
-	doneOut := make(chan struct{})
+	errCh := make(chan error, 2)
 	go func() {
 		_, copyErr := io.Copy(rwc, os.Stdin)
-		if copyErr == nil || copyErr == io.EOF {
+		if copyErr == nil || errors.Is(copyErr, io.EOF) {
 			if tcpConn, ok := rwc.(*net.TCPConn); ok {
 				_ = tcpConn.CloseWrite()
 			}
@@ -108,13 +110,22 @@ func main() {
 				_ = ws.SendEOF()
 			}
 		}
+		errCh <- copyErr
 	}()
 
 	go func() {
-		_, _ = io.Copy(os.Stdout, rwc)
-		close(doneOut)
+		_, copyErr := io.Copy(os.Stdout, rwc)
+		errCh <- copyErr
 	}()
 
-	<-doneOut
+	firstErr := <-errCh
 	_ = rwc.Close()
+	select {
+	case <-errCh:
+	case <-time.After(2 * time.Second):
+	}
+
+	if firstErr != nil && !errors.Is(firstErr, io.EOF) {
+		os.Exit(1)
+	}
 }
