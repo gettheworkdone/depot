@@ -40,6 +40,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "connect error: %v\n", err)
 			os.Exit(1)
 		}
+		tuneConn(conn)
 		if err := protocol.WriteAuth(conn, *password); err != nil {
 			fmt.Fprintf(os.Stderr, "auth write error: %v\n", err)
 			os.Exit(1)
@@ -86,6 +87,7 @@ func main() {
 			}
 			os.Exit(1)
 		}
+		tuneConn(conn.UnderlyingConn())
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(*password)); err != nil {
 			fmt.Fprintf(os.Stderr, "auth write error: %v\n", err)
 			os.Exit(1)
@@ -135,5 +137,27 @@ func main() {
 
 	if firstErr != nil && !errors.Is(firstErr, io.EOF) {
 		os.Exit(1)
+	}
+}
+
+func tuneConn(c net.Conn) {
+	for c != nil {
+		if tcp, ok := c.(*net.TCPConn); ok {
+			_ = tcp.SetNoDelay(true)
+			_ = tcp.SetKeepAlive(true)
+			_ = tcp.SetKeepAlivePeriod(30 * time.Second)
+			return
+		}
+		type netConner interface{ NetConn() net.Conn }
+		if nc, ok := c.(netConner); ok {
+			c = nc.NetConn()
+			continue
+		}
+		type underlyingConner interface{ UnderlyingConn() net.Conn }
+		if uc, ok := c.(underlyingConner); ok {
+			c = uc.UnderlyingConn()
+			continue
+		}
+		return
 	}
 }

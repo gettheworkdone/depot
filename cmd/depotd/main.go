@@ -65,6 +65,7 @@ func runTCP(addr, password string, mu *sync.Mutex, busy *bool) {
 		if err != nil {
 			continue
 		}
+		tuneConn(conn)
 
 		mu.Lock()
 		if *busy {
@@ -104,6 +105,7 @@ func runHTTPWS(addr, wsPath, password string, mu *sync.Mutex, busy *bool, tlsEna
 			return
 		}
 		defer conn.Close()
+		tuneConn(conn.UnderlyingConn())
 
 		handleWSConn(conn, password)
 	})
@@ -187,6 +189,28 @@ func runShell(stream io.ReadWriteCloser) {
 		select {
 		case <-doneOut:
 		case <-time.After(2 * time.Second):
+		}
+		return
+	}
+}
+
+func tuneConn(c net.Conn) {
+	for c != nil {
+		if tcp, ok := c.(*net.TCPConn); ok {
+			_ = tcp.SetNoDelay(true)
+			_ = tcp.SetKeepAlive(true)
+			_ = tcp.SetKeepAlivePeriod(30 * time.Second)
+			return
+		}
+		type netConner interface{ NetConn() net.Conn }
+		if nc, ok := c.(netConner); ok {
+			c = nc.NetConn()
+			continue
+		}
+		type underlyingConner interface{ UnderlyingConn() net.Conn }
+		if uc, ok := c.(underlyingConner); ok {
+			c = uc.UnderlyingConn()
+			continue
 		}
 		return
 	}
