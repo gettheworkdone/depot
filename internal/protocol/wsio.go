@@ -5,13 +5,19 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
 
 const (
-	wsEOFMarker = "__DEPOT_EOF__"
-	wsDataPref  = "D:"
+	wsEOFMarker      = "__DEPOT_EOF__"
+	wsDataPref       = "D:"
+	wsReadTimeout    = 45 * time.Second
+	wsWriteTimeout   = 10 * time.Second
+	wsPingInterval   = 15 * time.Second
+	wsPongExtendBy   = 45 * time.Second
+	wsCloseWaitLimit = 3 * time.Second
 )
 
 // WSStream adapts a websocket connection to an io.ReadWriteCloser.
@@ -24,10 +30,41 @@ type WSStream struct {
 	pending []byte
 	off     int
 	writeMu sync.Mutex
+	closeCh chan struct{}
+	once    sync.Once
 }
 
 func NewWSStream(conn *websocket.Conn) *WSStream {
-	return &WSStream{conn: conn}
+	w := &WSStream{
+		conn:    conn,
+		closeCh: make(chan struct{}),
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(wsPongExtendBy))
+	})
+	go w.pingLoop()
+	return w
+}
+
+func (w *WSStream) pingLoop() {
+	t := time.NewTicker(wsPingInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-w.closeCh:
+			return
+		case <-t.C:
+			w.writeMu.Lock()
+			_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+			err := w.conn.WriteMessage(websocket.PingMessage, []byte("p"))
+			w.writeMu.Unlock()
+			if err != nil {
+				_ = w.Close()
+				return
+			}
+		}
+	}
 }
 
 func (w *WSStream) Read(p []byte) (int, error) {
@@ -43,6 +80,7 @@ func (w *WSStream) Read(p []byte) (int, error) {
 
 	for {
 		if w.reader == nil {
+			_ = w.conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
 			msgType, r, err := w.conn.NextReader()
 			if err != nil {
 				return 0, err
@@ -98,6 +136,7 @@ func (w *WSStream) Write(p []byte) (int, error) {
 	defer w.writeMu.Unlock()
 
 	payload := wsDataPref + base64.StdEncoding.EncodeToString(p)
+	_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 	if err := w.conn.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
 		return 0, err
 	}
@@ -107,9 +146,15 @@ func (w *WSStream) Write(p []byte) (int, error) {
 func (w *WSStream) SendEOF() error {
 	w.writeMu.Lock()
 	defer w.writeMu.Unlock()
+	_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 	return w.conn.WriteMessage(websocket.TextMessage, []byte(wsEOFMarker))
 }
 
 func (w *WSStream) Close() error {
+	w.once.Do(func() { close(w.closeCh) })
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
+	_ = w.conn.SetWriteDeadline(time.Now().Add(wsCloseWaitLimit))
+	_ = w.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 	return w.conn.Close()
 }
