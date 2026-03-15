@@ -99,12 +99,14 @@ func main() {
 
 	doneOut := make(chan struct{})
 	go func() {
-		_, _ = io.Copy(rwc, os.Stdin)
-		if tcpConn, ok := rwc.(*net.TCPConn); ok {
-			_ = tcpConn.CloseWrite()
-		}
-		if ws, ok := rwc.(*protocol.WSStream); ok {
-			_ = ws.SendEOF()
+		_, copyErr := io.Copy(rwc, os.Stdin)
+		if copyErr == nil || copyErr == io.EOF {
+			if tcpConn, ok := rwc.(*net.TCPConn); ok {
+				_ = tcpConn.CloseWrite()
+			}
+			if ws, ok := rwc.(*protocol.WSStream); ok {
+				_ = ws.SendEOF()
+			}
 		}
 	}()
 
