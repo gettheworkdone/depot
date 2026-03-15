@@ -16,6 +16,7 @@ const (
 	wsReadTimeout  = 60 * time.Second
 	wsWriteTimeout = 10 * time.Second
 	wsPingInterval = 20 * time.Second
+	wsMaxBatchSize = 8192
 )
 
 type wsMsgKind int
@@ -23,7 +24,6 @@ type wsMsgKind int
 const (
 	wsMsgData wsMsgKind = iota
 	wsMsgEOF
-	wsMsgClose
 )
 
 type wsMsg struct {
@@ -50,7 +50,7 @@ type WSStream struct {
 func NewWSStream(conn *websocket.Conn) *WSStream {
 	w := &WSStream{
 		conn:    conn,
-		sendCh:  make(chan wsMsg, 32),
+		sendCh:  make(chan wsMsg, 256),
 		closeCh: make(chan struct{}),
 	}
 
@@ -67,29 +67,31 @@ func (w *WSStream) writeLoop() {
 	pingTicker := time.NewTicker(wsPingInterval)
 	defer pingTicker.Stop()
 
+	var carry *wsMsg
+
 	for {
-		select {
-		case <-w.closeCh:
-			return
-		case <-pingTicker.C:
-			_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
-			if err := w.conn.WriteMessage(websocket.PingMessage, []byte("p")); err != nil {
-				_ = w.forceClose()
+		var msg wsMsg
+		if carry != nil {
+			msg = *carry
+			carry = nil
+		} else {
+			select {
+			case <-w.closeCh:
 				return
+			case <-pingTicker.C:
+				_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+				if err := w.conn.WriteMessage(websocket.PingMessage, []byte("p")); err != nil {
+					_ = w.forceClose()
+					return
+				}
+				continue
+			case msg = <-w.sendCh:
 			}
-		case msg := <-w.sendCh:
-			var err error
-			_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
-			switch msg.kind {
-			case wsMsgData:
-				payload := wsDataPref + base64.StdEncoding.EncodeToString(msg.data)
-				err = w.conn.WriteMessage(websocket.TextMessage, []byte(payload))
-			case wsMsgEOF:
-				err = w.conn.WriteMessage(websocket.TextMessage, []byte(wsEOFMarker))
-			case wsMsgClose:
-				err = w.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-				_ = w.conn.Close()
-			}
+		}
+
+		switch msg.kind {
+		case wsMsgEOF:
+			err := w.writeText([]byte(wsEOFMarker))
 			if msg.ack != nil {
 				msg.ack <- err
 			}
@@ -97,11 +99,45 @@ func (w *WSStream) writeLoop() {
 				_ = w.forceClose()
 				return
 			}
-			if msg.kind == wsMsgClose {
+
+		case wsMsgData:
+			batch := make([]byte, 0, len(msg.data))
+			batch = append(batch, msg.data...)
+			acks := []chan error{msg.ack}
+
+			for len(batch) < wsMaxBatchSize {
+				select {
+				case next := <-w.sendCh:
+					if next.kind != wsMsgData {
+						carry = &next
+						goto flush
+					}
+					batch = append(batch, next.data...)
+					acks = append(acks, next.ack)
+				default:
+					goto flush
+				}
+			}
+
+		flush:
+			payload := wsDataPref + base64.StdEncoding.EncodeToString(batch)
+			err := w.writeText([]byte(payload))
+			for _, ack := range acks {
+				if ack != nil {
+					ack <- err
+				}
+			}
+			if err != nil {
+				_ = w.forceClose()
 				return
 			}
 		}
 	}
+}
+
+func (w *WSStream) writeText(payload []byte) error {
+	_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+	return w.conn.WriteMessage(websocket.TextMessage, payload)
 }
 
 func (w *WSStream) Read(p []byte) (int, error) {
