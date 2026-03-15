@@ -68,7 +68,7 @@ func main() {
 			}
 		}
 
-		dialer := websocket.Dialer{}
+		dialer := websocket.Dialer{EnableCompression: false}
 		conn, resp, err := dialer.Dial(u.String(), http.Header{})
 		if err != nil {
 			if resp != nil {

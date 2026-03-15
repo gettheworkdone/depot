@@ -85,7 +85,7 @@ func runTCP(addr, password string, mu *sync.Mutex, busy *bool) {
 }
 
 func runHTTPWS(addr, wsPath, password string, mu *sync.Mutex, busy *bool, tlsEnabled bool, certFile, keyFile string) {
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }, EnableCompression: false}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(wsPath, func(w http.ResponseWriter, r *http.Request) {
