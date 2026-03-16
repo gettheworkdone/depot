@@ -128,6 +128,84 @@ On macOS, you can trust it from terminal with:
 sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ./server.crt
 ```
 
+
+## Extra transport tuning flags (new)
+
+Both `depot` and `depotd` now expose additional knobs so you can try multiple compatibility modes without changing code:
+
+- `-ws-frame-mode text|binary`
+  - `text` (default): base64 text websocket frames (most middlebox-friendly).
+  - `binary`: raw websocket binary frames (can work better on some paths).
+- `-ws-read-timeout <duration>` (default `60s`)
+- `-ws-write-timeout <duration>` (default `10s`)
+- `-ws-ping-interval <duration>` (default `20s`)
+- `-ws-batch-wait <duration>` (default `2ms`)
+  - coalesces many tiny keystroke writes into fewer websocket frames.
+- `-ws-max-batch <bytes>` (default `8192`)
+- `-ws-queue <count>` (default `1024`)
+  - bigger queue can avoid input-side blocking when typing/pasting bursts.
+- `-tcp-no-delay=true|false` (default `true`)
+- `-tcp-keepalive <duration>` (default `30s`, set `0` to disable keepalive tuning)
+- client only: `-no-raw`
+  - disable local raw terminal mode and use line mode instead. This is useful for diagnosing hangs that happen only with per-keystroke input.
+
+## Quick compatibility presets to try (HTTPS+WSS)
+
+If your default setup still hangs, try these presets in order. Use **same ws flags on both server and client** unless noted otherwise.
+
+### Preset A: binary frames + moderate batching
+
+Server:
+
+```bash
+./depotd -proto httpswss -listen 0.0.0.0:443 -ws-path /ws \
+  -tls-cert server.crt -tls-key server.key -password yourpass \
+  -ws-frame-mode binary -ws-batch-wait 5ms -ws-max-batch 16384 -ws-queue 4096
+```
+
+Client:
+
+```bash
+./depot -proto httpswss -addr ${VPS_IP}:443 -ws-path /ws -password yourpass \
+  -ws-frame-mode binary -ws-batch-wait 5ms -ws-max-batch 16384 -ws-queue 4096
+```
+
+### Preset B: text frames + heavier batching
+
+Server:
+
+```bash
+./depotd -proto httpswss -listen 0.0.0.0:443 -ws-path /ws \
+  -tls-cert server.crt -tls-key server.key -password yourpass \
+  -ws-frame-mode text -ws-batch-wait 10ms -ws-max-batch 32768 -ws-queue 8192
+```
+
+Client:
+
+```bash
+./depot -proto httpswss -addr ${VPS_IP}:443 -ws-path /ws -password yourpass \
+  -ws-frame-mode text -ws-batch-wait 10ms -ws-max-batch 32768 -ws-queue 8192
+```
+
+### Preset C: line-mode input diagnostic
+
+Client only (server unchanged):
+
+```bash
+./depot -proto httpswss -addr ${VPS_IP}:443 -ws-path /ws -password yourpass -no-raw
+```
+
+If `-no-raw` is stable while raw mode hangs, your path/device likely dislikes tiny per-keystroke bursts. Keep batching enabled (`-ws-batch-wait`) and prefer paste/line mode, or use `-proto tcp` if security model allows.
+
+### Preset D: relax deadlines on unstable links
+
+Use on both sides:
+
+```bash
+-ws-read-timeout 180s -ws-write-timeout 30s -ws-ping-interval 30s
+```
+
+
 ## Run `depotd` permanently on VPS with auto-restart (systemd)
 
 1. Copy `depotd`, `server.crt`, and `server.key` to the VPS.

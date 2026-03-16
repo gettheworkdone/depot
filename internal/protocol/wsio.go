@@ -11,13 +11,31 @@ import (
 )
 
 const (
-	wsEOFMarker    = "__DEPOT_EOF__"
-	wsDataPref     = "D:"
-	wsReadTimeout  = 60 * time.Second
-	wsWriteTimeout = 10 * time.Second
-	wsPingInterval = 20 * time.Second
-	wsMaxBatchSize = 8192
+	wsEOFMarker      = "__DEPOT_EOF__"
+	wsDataPref       = "D:"
+	defaultReadTO    = 60 * time.Second
+	defaultWriteTO   = 10 * time.Second
+	defaultPingInt   = 20 * time.Second
+	defaultBatchSize = 8192
+	defaultQueueSize = 256
 )
+
+type WSFrameMode string
+
+const (
+	WSFrameModeTextB64 WSFrameMode = "text"
+	WSFrameModeBinary  WSFrameMode = "binary"
+)
+
+type WSOptions struct {
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	PingInterval time.Duration
+	MaxBatchSize int
+	QueueSize    int
+	BatchWait    time.Duration
+	FrameMode    WSFrameMode
+}
 
 type wsMsgKind int
 
@@ -33,11 +51,11 @@ type wsMsg struct {
 }
 
 // WSStream adapts websocket frames as a byte stream.
-// It uses text/base64 data frames for middlebox compatibility and a single writer loop
-// to avoid concurrent websocket writes.
+// It supports either text/base64 framing or binary frames and uses a single
+// writer loop to avoid concurrent websocket writes.
 type WSStream struct {
-	conn *websocket.Conn
-
+	conn    *websocket.Conn
+	opts    WSOptions
 	reader  io.Reader
 	pending []byte
 	off     int
@@ -48,15 +66,39 @@ type WSStream struct {
 }
 
 func NewWSStream(conn *websocket.Conn) *WSStream {
+	return NewWSStreamWithOptions(conn, WSOptions{})
+}
+
+func NewWSStreamWithOptions(conn *websocket.Conn, opts WSOptions) *WSStream {
+	if opts.ReadTimeout <= 0 {
+		opts.ReadTimeout = defaultReadTO
+	}
+	if opts.WriteTimeout <= 0 {
+		opts.WriteTimeout = defaultWriteTO
+	}
+	if opts.PingInterval <= 0 {
+		opts.PingInterval = defaultPingInt
+	}
+	if opts.MaxBatchSize <= 0 {
+		opts.MaxBatchSize = defaultBatchSize
+	}
+	if opts.QueueSize <= 0 {
+		opts.QueueSize = defaultQueueSize
+	}
+	if opts.FrameMode == "" {
+		opts.FrameMode = WSFrameModeTextB64
+	}
+
 	w := &WSStream{
 		conn:    conn,
-		sendCh:  make(chan wsMsg, 256),
+		opts:    opts,
+		sendCh:  make(chan wsMsg, opts.QueueSize),
 		closeCh: make(chan struct{}),
 	}
 
-	_ = conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+	_ = conn.SetReadDeadline(time.Now().Add(w.opts.ReadTimeout))
 	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+		return conn.SetReadDeadline(time.Now().Add(w.opts.ReadTimeout))
 	})
 
 	go w.writeLoop()
@@ -64,7 +106,7 @@ func NewWSStream(conn *websocket.Conn) *WSStream {
 }
 
 func (w *WSStream) writeLoop() {
-	pingTicker := time.NewTicker(wsPingInterval)
+	pingTicker := time.NewTicker(w.opts.PingInterval)
 	defer pingTicker.Stop()
 
 	var carry *wsMsg
@@ -79,7 +121,7 @@ func (w *WSStream) writeLoop() {
 			case <-w.closeCh:
 				return
 			case <-pingTicker.C:
-				_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+				_ = w.conn.SetWriteDeadline(time.Now().Add(w.opts.WriteTimeout))
 				if err := w.conn.WriteMessage(websocket.PingMessage, []byte("p")); err != nil {
 					_ = w.forceClose()
 					return
@@ -91,7 +133,7 @@ func (w *WSStream) writeLoop() {
 
 		switch msg.kind {
 		case wsMsgEOF:
-			err := w.writeText([]byte(wsEOFMarker))
+			err := w.writeEOF()
 			if msg.ack != nil {
 				msg.ack <- err
 			}
@@ -104,24 +146,41 @@ func (w *WSStream) writeLoop() {
 			batch := make([]byte, 0, len(msg.data))
 			batch = append(batch, msg.data...)
 			acks := []chan error{msg.ack}
-
-			for len(batch) < wsMaxBatchSize {
-				select {
-				case next := <-w.sendCh:
-					if next.kind != wsMsgData {
-						carry = &next
+			if w.opts.BatchWait > 0 {
+				deadline := time.NewTimer(w.opts.BatchWait)
+				for len(batch) < w.opts.MaxBatchSize {
+					select {
+					case next := <-w.sendCh:
+						if next.kind != wsMsgData {
+							carry = &next
+							deadline.Stop()
+							goto flush
+						}
+						batch = append(batch, next.data...)
+						acks = append(acks, next.ack)
+					case <-deadline.C:
 						goto flush
 					}
-					batch = append(batch, next.data...)
-					acks = append(acks, next.ack)
-				default:
-					goto flush
+				}
+				deadline.Stop()
+			} else {
+				for len(batch) < w.opts.MaxBatchSize {
+					select {
+					case next := <-w.sendCh:
+						if next.kind != wsMsgData {
+							carry = &next
+							goto flush
+						}
+						batch = append(batch, next.data...)
+						acks = append(acks, next.ack)
+					default:
+						goto flush
+					}
 				}
 			}
 
 		flush:
-			payload := wsDataPref + base64.StdEncoding.EncodeToString(batch)
-			err := w.writeText([]byte(payload))
+			err := w.writeData(batch)
 			for _, ack := range acks {
 				if ack != nil {
 					ack <- err
@@ -135,9 +194,21 @@ func (w *WSStream) writeLoop() {
 	}
 }
 
-func (w *WSStream) writeText(payload []byte) error {
-	_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
-	return w.conn.WriteMessage(websocket.TextMessage, payload)
+func (w *WSStream) writeData(batch []byte) error {
+	_ = w.conn.SetWriteDeadline(time.Now().Add(w.opts.WriteTimeout))
+	if w.opts.FrameMode == WSFrameModeBinary {
+		return w.conn.WriteMessage(websocket.BinaryMessage, batch)
+	}
+	payload := wsDataPref + base64.StdEncoding.EncodeToString(batch)
+	return w.conn.WriteMessage(websocket.TextMessage, []byte(payload))
+}
+
+func (w *WSStream) writeEOF() error {
+	_ = w.conn.SetWriteDeadline(time.Now().Add(w.opts.WriteTimeout))
+	if w.opts.FrameMode == WSFrameModeBinary {
+		return w.conn.WriteMessage(websocket.TextMessage, []byte(wsEOFMarker))
+	}
+	return w.conn.WriteMessage(websocket.TextMessage, []byte(wsEOFMarker))
 }
 
 func (w *WSStream) Read(p []byte) (int, error) {
@@ -153,13 +224,17 @@ func (w *WSStream) Read(p []byte) (int, error) {
 
 	for {
 		if w.reader == nil {
-			_ = w.conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+			_ = w.conn.SetReadDeadline(time.Now().Add(w.opts.ReadTimeout))
 			msgType, r, err := w.conn.NextReader()
 			if err != nil {
 				return 0, err
 			}
 			switch msgType {
 			case websocket.BinaryMessage:
+				if w.opts.FrameMode == WSFrameModeBinary {
+					w.reader = r
+					continue
+				}
 				w.reader = r
 				continue
 			case websocket.TextMessage:
@@ -182,6 +257,9 @@ func (w *WSStream) Read(p []byte) (int, error) {
 						w.off = n
 					}
 					return n, nil
+				}
+				if w.opts.FrameMode == WSFrameModeBinary {
+					continue
 				}
 				continue
 			default:

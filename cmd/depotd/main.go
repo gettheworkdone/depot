@@ -25,6 +25,15 @@ func main() {
 	wsPath := flag.String("ws-path", "/ws", "websocket path when -proto=httpws|httpswss")
 	tlsCert := flag.String("tls-cert", "", "TLS certificate PEM file (required for -proto=httpswss)")
 	tlsKey := flag.String("tls-key", "", "TLS private key PEM file (required for -proto=httpswss)")
+	wsFrameMode := flag.String("ws-frame-mode", "text", "WebSocket framing mode: text or binary")
+	wsReadTimeout := flag.Duration("ws-read-timeout", 60*time.Second, "WebSocket read timeout")
+	wsWriteTimeout := flag.Duration("ws-write-timeout", 10*time.Second, "WebSocket write timeout")
+	wsPingInterval := flag.Duration("ws-ping-interval", 20*time.Second, "WebSocket ping interval")
+	wsBatchWait := flag.Duration("ws-batch-wait", 2*time.Millisecond, "max delay to coalesce small outgoing websocket writes")
+	wsMaxBatch := flag.Int("ws-max-batch", 8192, "maximum bytes coalesced per websocket frame")
+	wsQueue := flag.Int("ws-queue", 1024, "queued websocket write chunks")
+	tcpNoDelay := flag.Bool("tcp-no-delay", true, "set TCP_NODELAY on accepted sockets")
+	tcpKeepAlive := flag.Duration("tcp-keepalive", 30*time.Second, "TCP keepalive period (<=0 disables keepalive tuning)")
 	flag.Parse()
 
 	if *password == "" {
@@ -35,24 +44,41 @@ func main() {
 	var mu sync.Mutex
 	busy := false
 
+	frameMode := protocol.WSFrameModeTextB64
+	if *wsFrameMode == "binary" {
+		frameMode = protocol.WSFrameModeBinary
+	} else if *wsFrameMode != "text" {
+		fmt.Fprintln(os.Stderr, "-ws-frame-mode must be text or binary")
+		os.Exit(2)
+	}
+	wsOpts := protocol.WSOptions{
+		ReadTimeout:  *wsReadTimeout,
+		WriteTimeout: *wsWriteTimeout,
+		PingInterval: *wsPingInterval,
+		BatchWait:    *wsBatchWait,
+		MaxBatchSize: *wsMaxBatch,
+		QueueSize:    *wsQueue,
+		FrameMode:    frameMode,
+	}
+
 	switch *proto {
 	case "tcp":
-		runTCP(*addr, *password, &mu, &busy)
+		runTCP(*addr, *password, &mu, &busy, *tcpNoDelay, *tcpKeepAlive)
 	case "httpws":
-		runHTTPWS(*addr, *wsPath, *password, &mu, &busy, false, "", "")
+		runHTTPWS(*addr, *wsPath, *password, &mu, &busy, false, "", "", wsOpts, *tcpNoDelay, *tcpKeepAlive)
 	case "httpswss":
 		if *tlsCert == "" || *tlsKey == "" {
 			fmt.Fprintln(os.Stderr, "-tls-cert and -tls-key are required for -proto=httpswss")
 			os.Exit(2)
 		}
-		runHTTPWS(*addr, *wsPath, *password, &mu, &busy, true, *tlsCert, *tlsKey)
+		runHTTPWS(*addr, *wsPath, *password, &mu, &busy, true, *tlsCert, *tlsKey, wsOpts, *tcpNoDelay, *tcpKeepAlive)
 	default:
 		fmt.Fprintln(os.Stderr, "-proto must be one of: tcp, httpws, httpswss")
 		os.Exit(2)
 	}
 }
 
-func runTCP(addr, password string, mu *sync.Mutex, busy *bool) {
+func runTCP(addr, password string, mu *sync.Mutex, busy *bool, noDelay bool, keepAlive time.Duration) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "listen error: %v\n", err)
@@ -65,7 +91,7 @@ func runTCP(addr, password string, mu *sync.Mutex, busy *bool) {
 		if err != nil {
 			continue
 		}
-		tuneConn(conn)
+		tuneConn(conn, noDelay, keepAlive)
 
 		mu.Lock()
 		if *busy {
@@ -85,7 +111,7 @@ func runTCP(addr, password string, mu *sync.Mutex, busy *bool) {
 	}
 }
 
-func runHTTPWS(addr, wsPath, password string, mu *sync.Mutex, busy *bool, tlsEnabled bool, certFile, keyFile string) {
+func runHTTPWS(addr, wsPath, password string, mu *sync.Mutex, busy *bool, tlsEnabled bool, certFile, keyFile string, wsOpts protocol.WSOptions, noDelay bool, keepAlive time.Duration) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }, EnableCompression: false}
 
 	mux := http.NewServeMux()
@@ -105,9 +131,9 @@ func runHTTPWS(addr, wsPath, password string, mu *sync.Mutex, busy *bool, tlsEna
 			return
 		}
 		defer conn.Close()
-		tuneConn(conn.UnderlyingConn())
+		tuneConn(conn.UnderlyingConn(), noDelay, keepAlive)
 
-		handleWSConn(conn, password)
+		handleWSConn(conn, password, wsOpts)
 	})
 
 	var err error
@@ -140,7 +166,7 @@ func handleTCPConn(conn net.Conn, expectedPassword string) {
 	runShell(conn)
 }
 
-func handleWSConn(conn *websocket.Conn, expectedPassword string) {
+func handleWSConn(conn *websocket.Conn, expectedPassword string, wsOpts protocol.WSOptions) {
 	_, msg, err := conn.ReadMessage()
 	if err != nil || string(msg) != expectedPassword {
 		_ = conn.WriteMessage(websocket.TextMessage, []byte("NO\n"))
@@ -149,7 +175,7 @@ func handleWSConn(conn *websocket.Conn, expectedPassword string) {
 	if err := conn.WriteMessage(websocket.TextMessage, []byte("OK\n")); err != nil {
 		return
 	}
-	stream := protocol.NewWSStream(conn)
+	stream := protocol.NewWSStreamWithOptions(conn, wsOpts)
 	runShell(stream)
 }
 
@@ -194,12 +220,16 @@ func runShell(stream io.ReadWriteCloser) {
 	}
 }
 
-func tuneConn(c net.Conn) {
+func tuneConn(c net.Conn, noDelay bool, keepAlive time.Duration) {
 	for c != nil {
 		if tcp, ok := c.(*net.TCPConn); ok {
-			_ = tcp.SetNoDelay(true)
-			_ = tcp.SetKeepAlive(true)
-			_ = tcp.SetKeepAlivePeriod(30 * time.Second)
+			if noDelay {
+				_ = tcp.SetNoDelay(true)
+			}
+			if keepAlive > 0 {
+				_ = tcp.SetKeepAlive(true)
+				_ = tcp.SetKeepAlivePeriod(keepAlive)
+			}
 			return
 		}
 		type netConner interface{ NetConn() net.Conn }
